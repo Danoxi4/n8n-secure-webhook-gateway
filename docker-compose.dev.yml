@@ -1,0 +1,14 @@
+# Local development override: publishes ports so you can test without a domain or TLS.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# Do NOT use on a public server.
+services:
+  gateway:
+    ports:
+      - "127.0.0.1:3000:3000"
+  n8n:
+    environment:
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: "false"
+      WEBHOOK_URL: http://localhost:5678/
+    ports:
+      - "127.0.0.1:5678:5678"

@@ -1,0 +1,84 @@
+ name: n8n-secure-stack
+
+# Networks
+#   proxy   : reachable by Nginx Proxy Manager (public-facing services only)
+#   backend : internal-only (no outbound/inbound from host). MongoDB lives here exclusively.
+networks:
+  proxy:
+  backend:
+    internal: true
+
+# Named volumes: survive `docker compose down` and server reboots (NFR-03)
+volumes:
+  mongo_data:
+  n8n_data:
+  npm_data:
+  npm_letsencrypt:
+
+services:
+  # ---------- Reverse proxy + TLS (FR-01 / FR-102) ----------
+  proxy:
+    image: jc21/nginx-proxy-manager:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"     # HTTP (Let's Encrypt challenge, redirect)
+      - "443:443"   # HTTPS
+      - "81:81"     # Admin UI: restrict with a firewall / SSH tunnel in production
+    volumes:
+      - npm_data:/data
+      - npm_letsencrypt:/etc/letsencrypt
+    networks: [proxy]
+
+  # ---------- Webhook gateway (FR-02..FR-06) ----------
+  gateway:
+    build: ./gateway
+    restart: unless-stopped
+    depends_on:
+      mongo: { condition: service_healthy }
+      n8n: { condition: service_started }
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongo:27017/${MONGO_DB}?authSource=admin
+      N8N_WEBHOOK_URL: http://n8n:5678/webhook/${N8N_WEBHOOK_PATH:-gateway-intake}
+      N8N_GATEWAY_TOKEN: ${N8N_GATEWAY_TOKEN}
+      REPLAY_TOLERANCE_SECONDS: ${REPLAY_TOLERANCE_SECONDS:-300}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET:-}
+      CUSTOM_WEBHOOK_SECRET: ${CUSTOM_WEBHOOK_SECRET:-}
+    networks: [proxy, backend]
+
+  # ---------- n8n (FR-101): uses its built-in SQLite, stored in the n8n_data volume ----------
+  n8n:
+    image: n8nio/n8n:${N8N_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PROTOCOL: https
+      N8N_PROXY_HOPS: 1
+      WEBHOOK_URL: https://${N8N_HOST}/
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    # proxy: editor UI via Nginx Proxy Manager. backend: gateway -> n8n.
+    networks: [proxy, backend]
+
+  # ---------- MongoDB: backend network only, no published ports ----------
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [backend]
